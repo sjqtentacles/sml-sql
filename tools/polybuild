@@ -1,0 +1,57 @@
+#!/bin/sh
+set -eu
+out=""
+mlb=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o) shift; out="$1" ;;
+        *)  mlb="$1" ;;
+    esac
+    shift
+done
+if [ -z "$mlb" ] || [ -z "$out" ]; then
+    echo "Usage: polybuild -o OUTPUT FILE.mlb" 1>&2
+    exit 2
+fi
+strip_line() {
+    printf '%s' "$1" | sed -e 's/(\*.*\*)//g' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+}
+expand_mlb() (
+    _mlb="$1"
+    _dir=$(dirname "$_mlb")
+    while IFS= read -r _raw || [ -n "$_raw" ]; do
+        _line=$(strip_line "$_raw")
+        [ -z "$_line" ] && continue
+        case "$_line" in
+            \$\(*) continue ;;
+            *.mlb) expand_mlb "$_dir/$_line" ;;
+            *.sml|*.sig|*.fun)
+                case "$_line" in
+                    main.sml|*/main.sml) : ;;
+                    *) printf '%s\n' "$_dir/$_line" ;;
+                esac ;;
+            *) continue ;;
+        esac
+    done < "$_mlb"
+)
+tmpobj="${TMPDIR:-/tmp}/polybuild.$$.o"
+trap 'rm -f "$tmpobj"' EXIT
+{
+    expand_mlb "$mlb" | while IFS= read -r f; do
+        printf 'val () = use "%s";\n' "$f"
+    done
+    printf 'val () = PolyML.export("%s", main);\n' "$tmpobj"
+} | poly -q --error-exit
+polyc_path=$(command -v polyc)
+libdir=$(sed -n 's/^LIBDIR="\(.*\)"/\1/p' "$polyc_path" | head -n1)
+link=$(sed -n 's/^LINK="\(.*\)"/\1/p' "$polyc_path" | head -n1)
+: "${link:=c++}"
+: "${libdir:=/usr/local/lib}"
+extra_ldflags=""
+case "$(uname -s)" in
+    Darwin) extra_ldflags="-Wl,-ld_classic" ;;
+esac
+if ! $link "$tmpobj" -o "$out" $extra_ldflags \
+        -L"$libdir" -Wl,-rpath,"$libdir" -lpolymain -lpolyml; then
+    polyc -o "$out" "$tmpobj"
+fi
